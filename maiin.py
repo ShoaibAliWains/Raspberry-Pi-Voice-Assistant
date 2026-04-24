@@ -6,7 +6,7 @@ import os
 import re
 import time
 import wave
-import audioop
+import audioop  # Note: Deprecated in Python 3.11+, removed in 3.13. Safe for Bullseye/Bookworm.
 import tempfile
 import subprocess
 import gc  # Added for memory optimization on Pi Zero 2W
@@ -34,8 +34,10 @@ WAKE_ALIASES = [
 WAKE_LISTEN_SECONDS = 2.5
 QUESTION_SECONDS = 5.0
 
-GEMINI_MODEL = "gemini-2.5-flash"
-TTS_VOICE_NAME = "cs-CZ-Chirp3-HD-Achird"
+GEMINI_MODEL = "gemini-2.0-flash"
+
+# Switched to Wavenet for faster response times on low-end hardware
+TTS_VOICE_NAME = "cs-CZ-Wavenet-A"
 
 DEBUG = True
 POST_TTS_COOLDOWN = 1.0
@@ -70,8 +72,6 @@ def check_setup():
     cred = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
     if not cred or not os.path.exists(cred):
         raise RuntimeError("Chybí nebo neplatí GOOGLE_APPLICATION_CREDENTIALS")
-
-    texttospeech.TextToSpeechClient()
 
 
 def record_wav_with_arecord(seconds: float, device: str) -> bytes:
@@ -170,31 +170,28 @@ def should_process_text(text: str) -> bool:
     return True
 
 
-def ask_gemini(question: str) -> str:
-    client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-
+def ask_gemini(client, question: str) -> str:
     prompt = (
-        "Odpovídej pouze česky. "
+        "Jsi užitečný hlasový asistent. Odpovídej pouze česky. "
         "Odpovídej stručně, přirozeně a užitečně. "
-        "Nevypisuj dlouhé odstavce. "
         f"Dotaz uživatele: {question}"
     )
-
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt
-    )
-
-    if hasattr(response, "text") and response.text:
-        return response.text.strip()
-
+    
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt
+        )
+        if hasattr(response, "text") and response.text:
+            return response.text.strip()
+    except Exception as e:
+        debug_print(f"Gemini Error: {e}")
+        
     return "Promiň, teď se mi nepodařilo odpovědět."
 
 
-def speak_text(text: str):
-    client = texttospeech.TextToSpeechClient()
-
-    response = client.synthesize_speech(
+def speak_text(tts_client, text: str):
+    response = tts_client.synthesize_speech(
         input=texttospeech.SynthesisInput(text=text),
         voice=texttospeech.VoiceSelectionParams(
             language_code="cs-CZ",
@@ -247,34 +244,34 @@ def record_question_text(model: Model) -> str:
     return text
 
 
-def ask_once(model: Model):
+def ask_once(model: Model, gemini_client, tts_client):
     wait_for_wake_word(model)
 
     try:
-        speak_text("Ano?")
+        speak_text(tts_client, "Ano?")
     except Exception as e:
         print("Chyba TTS při potvrzení:", e)
 
-    time.sleep(0.3)
+    time.sleep(0.1) # Reduced to save latency
 
     user_text = record_question_text(model)
 
     if should_process_text(user_text):
         print("\nUživatel:", user_text)
         try:
-            answer = ask_gemini(user_text)
+            answer = ask_gemini(gemini_client, user_text)
             print("Asistent:", answer)
-            speak_text(answer)
+            speak_text(tts_client, answer)
         except Exception as e:
             print("Chyba při odpovědi:", e)
             try:
-                speak_text("Promiň, došlo k chybě.")
+                speak_text(tts_client, "Promiň, došlo k chybě.")
             except Exception:
                 pass
     else:
         print("Dotaz nebyl rozpoznán dostatečně dobře.")
         try:
-            speak_text("Promiň, nerozuměl jsem.")
+            speak_text(tts_client, "Promiň, nerozuměl jsem.")
         except Exception:
             pass
 
@@ -290,12 +287,16 @@ def main():
     print("Načítám Vosk model...")
     model = Model(VOSK_MODEL_PATH)
 
+    # Initialize clients ONCE outside the loop for speed and memory efficiency
+    gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+    tts_client = texttospeech.TextToSpeechClient()
+
     print("Asistent běží. Optimalizováno pro Raspberry Pi Zero 2W.")
     print("Musíš pokaždé znovu říct 'armor'.")
 
     while True:
         try:
-            ask_once(model)
+            ask_once(model, gemini_client, tts_client)
         except KeyboardInterrupt:
             print("\nUkončuji asistenta...")
             break
