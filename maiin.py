@@ -9,12 +9,13 @@ import wave
 import audioop
 import tempfile
 import subprocess
+import gc  # Added for memory optimization on Pi Zero 2W
 
 from vosk import Model, KaldiRecognizer
 from google import genai
 from google.cloud import texttospeech
 
-
+# --- CONFIGURATION ---
 VOSK_MODEL_PATH = os.path.expanduser("~/vosk-model-small-cs-0.4-rhasspy")
 
 USB_INPUT_DEVICE = "plughw:CARD=Device,DEV=0"
@@ -24,16 +25,10 @@ INPUT_RATE = 16000
 TARGET_RATE = 16000
 CHANNELS = 1
 
+# Optimized Wake Words
 WAKE_ALIASES = [
     "armor",
-    "armore",
-    "amor",
-    "armour",
-    "amor",
-    "amore",
-    "armr",
-    "haló armor",
-    "halo armor",
+    "armore"
 ]
 
 WAKE_LISTEN_SECONDS = 2.5
@@ -49,6 +44,11 @@ POST_TTS_COOLDOWN = 1.0
 def debug_print(*args):
     if DEBUG:
         print(*args)
+
+
+def get_ram_temp_dir():
+    """Use RAM disk (/dev/shm) on Raspberry Pi to prevent SD card wear and reduce latency"""
+    return "/dev/shm" if os.path.isdir("/dev/shm") else None
 
 
 def normalize_text(text: str) -> str:
@@ -75,7 +75,8 @@ def check_setup():
 
 
 def record_wav_with_arecord(seconds: float, device: str) -> bytes:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+    # Optimized to use RAM disk instead of writing to SD card
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav", dir=get_ram_temp_dir()) as f:
         temp_wav = f.name
 
     try:
@@ -147,11 +148,10 @@ def contains_wake_word(text: str) -> bool:
     if not text:
         return False
 
-    words = text.split()
-
     for alias in WAKE_ALIASES:
         alias = normalize_text(alias)
-        if alias in text:
+        # Check for exact word match to avoid false positives
+        if re.search(r'\b' + re.escape(alias) + r'\b', text):
             return True
 
     return False
@@ -205,7 +205,8 @@ def speak_text(text: str):
         )
     )
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+    # Use RAM disk for TTS playback optimization
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav", dir=get_ram_temp_dir()) as f:
         f.write(response.audio_content)
         temp_wav = f.name
 
@@ -231,6 +232,9 @@ def wait_for_wake_word(model: Model):
         if contains_wake_word(text):
             print("Wake slovo zachyceno.")
             return
+        
+        # Free memory during the continuous listening loop
+        gc.collect()
 
 
 def record_question_text(model: Model) -> str:
@@ -275,6 +279,9 @@ def ask_once(model: Model):
             pass
 
     time.sleep(POST_TTS_COOLDOWN)
+    
+    # Force memory cleanup after full cycle completes
+    gc.collect()
 
 
 def main():
@@ -283,7 +290,7 @@ def main():
     print("Načítám Vosk model...")
     model = Model(VOSK_MODEL_PATH)
 
-    print("Asistent běží.")
+    print("Asistent běží. Optimalizováno pro Raspberry Pi Zero 2W.")
     print("Musíš pokaždé znovu říct 'armor'.")
 
     while True:
